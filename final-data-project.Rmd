@@ -1,0 +1,968 @@
+---
+title: "An Analysis of Test Scores Against Various Social and Economic Factors"
+author: "Allison Zhang, Kobe Dela Cruz, Nishant Balepur"
+date: "11/30/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The purpose of our project is to effectively predict the test scores of high schoolers in 1986 based on a large number of predictor variables, some of which are gender, ethnicity, family income, etc. 
+
+
+Our ultimate goal for this project is to reason through the different predictor variables to find the model that can best predict high school test scores.
+
+<br />
+
+## Dataset
+
+We will be using the College Distance dataset from the AER package that can be found [here](https://rdrr.io/cran/AER/man/CollegeDistance.html)
+
+The data was obtained by the Department of Education, and contains many different social and economic variables, including: gender, ethnicity, whether or not the mother/father went to college, if the family owns their home, county, unemployment rate, and more.
+
+We first load `college_distance.csv` into R along with some required packages (hidden):
+
+```{r}
+collegedistance = read.csv("CollegeDistance.csv")
+```
+
+```{r include = FALSE, warning = FALSE, echo = TRUE, results = "hide"}
+library(readr)
+library(knitr)
+library(faraway)
+library(lmtest)
+library(zoo)
+library(ggplot2)
+library(reshape2)
+library(rsq)
+```
+
+This dataset has a total of 4739 observations of 15 variables (14 predictors and 1 response). The said variables are:
+
+- `gender`: a factor indicating gender
+- `ethnicity`: factor indicating ethnicity (African-American, Hispanic or other)
+- `score`: base year composite test score
+- `fcollege`: factor. Is the father a college graduate?
+- `mcollege`: factor. Is the mother a college graduate?
+- `home`: factor. Does the family own their home?
+- `urban`: factor. Is the school in an urban area?
+- `unemp`: country unemployment rate in 1980
+- `wage`: state hourly wage in manufacturing in 1980
+- `distance`: distance from 4-year college (in 10 miles)
+- `tuition`: average state 4-year college tuition (in 1000 USD)
+- `education`: number of years of education
+- `income`: factor. Is the family income above 25,000 USD per year?
+- `region`: factor indicating region (West or other)
+
+
+The dataset meets all of the set criteria for the project. Now lets look for missing values for our next step in data cleaning.
+
+<br />
+
+## Data Cleaning
+
+### Loading in the Dataset
+
+We received a warning message when loading the data that there was an unnamed column. Taking a look, we saw that R created another x-coordinate column. We will get rid of that.
+```{r}
+collegedistance = collegedistance[ , -1]
+head(collegedistance)
+```
+Next, we will see if there are any missing values within our dataset.
+```{r}
+sum(is.na(collegedistance))
+```
+Great! We see that there are no missing values in our dataset, so no additional work needs to be done there. 
+
+<br />
+
+### Converting Factor Variables
+
+We also notice that many of our variables are factor variables, so we need to convert those to binary values. The dependent variables will be converted as follows:
+
+- `ethnicity`: converted into two variables, `hispanic` and `afam`. A value of 1 means the student is Hispanic or African-American, respectively
+- `gender`: 1 for male, 0 for female
+- `fcollege`: 1 for yes, 0 for no
+- `mcollege`: 1 for yes, 0 for no
+- `home`: 1 for yes, 0 for no
+- `urban`: 1 for yes, 0 for no
+- `income`: 1 for high, 0 for low
+- `region`: 1 for west, 0 for other
+
+We'll use a function called `cleanData()` to modularize our code
+
+```{r}
+cleanData = function(data) {
+  # convert the ethnicity label and remove the old one
+  data$hispanic = 1 * (data$ethnicity == "hispanic")
+  data$afam = 1 * (data$ethnicity == "afam")
+  data = data[-1 * which(names(data) == "ethnicity")]
+  
+  # convert the rest of the labels with automation
+  convert_labels = c(c("fcollege", "yes"), c("mcollege", "yes"), c("home", "yes"),
+                     c("urban", "yes"), c("income", "high"), c("region", "west"),
+                     c("gender", "male"))
+  
+  # loop through each label
+  for (label_index in seq(1, length(convert_labels), 2)) {
+    
+    # get the column name and positive label name
+    col_name = convert_labels[label_index]
+    positive_label = convert_labels[label_index + 1]
+  
+    # convert the label appropriately
+    data[col_name] = 1 * (data[col_name] == positive_label)
+  }
+  
+  # return the data
+  return(data)
+}
+
+```
+
+Now let's take a look at the data with our adjusted variables
+
+```{r}
+collegedistance = cleanData(collegedistance)
+head(collegedistance)
+```
+
+It appears that none of the other variables need to be changed 
+
+<br />
+
+### Identifying Correlation
+
+Before we start creating our models, we'll take a look at our variables to ensure that there is no correlation affecting our model
+
+To do this, we'll need a correlation matrix
+
+```{r warning = FALSE}
+# get the correlation matrix
+college_cor = round(cor(collegedistance), 2)
+
+# remove the NA values
+college_cor[which(is.na(college_cor))] = 0
+
+# summary of the correlation
+head(college_cor)
+```
+
+
+This table is a little difficult to analyze, so we'll convert it to a visual heatmap
+
+```{r include = FALSE}
+
+# code reference: http://www.sthda.com/english/wiki/ggplot2-quick-correlation-matrix-heatmap-r-software-and-data-visualization
+
+# function to reorder the corelation matrix
+reorder_cormat = function(cormat){
+  # Use correlation between variables as distance
+  dd <- as.dist((1-cormat)/2)
+  hc <- hclust(dd)
+  cormat <- cormat[hc$order, hc$order]
+}
+
+# Get upper triangle of the correlation matrix
+get_lower_tri = function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+}
+
+# Get upper triangle of the correlation matrix
+get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+}
+
+# use our helper functions to format the correlation matrix
+melted_cormat = melt(get_upper_tri(reorder_cormat(college_cor)), na.rm = TRUE)
+
+# create the heat map
+ggheatmap = ggplot(melted_cormat, aes(Var2, Var1, fill = value)) +
+            ggtitle("Correlation Matrix Heatmap") +
+            xlab("Variable 1") + ylab("Variable 2") +
+            geom_tile(color = "white") +
+            scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                                 midpoint = 0, limit = c(-1,1), space = "Lab", 
+                                 name="Pearson\nCorrelation") +
+            theme_minimal() + 
+            theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                             size = 18, hjust = 1),
+                  axis.text.y = element_text(size = 18),
+                  axis.title = element_text(size = 25),
+                  plot.title = element_text(size = 30, hjust = 0.5),
+                  legend.text = element_text(size = 16),
+                  legend.title = element_text(size = 20),
+                  legend.key.width = unit(1, "cm"),
+                  legend.key.height = unit(2.5, "cm")) +
+            coord_fixed()
+            
+```
+
+```{r fig.height = 10, fig.width = 15}
+# print our heatmap (code hidden above)
+ggheatmap
+```
+
+From the above heatmap, we see that there are only a few variables that could be problematic. To further validate our findings, we'll explore the variance inflation factors for a simple additive model
+
+```{r warning = FALSE}
+simple_add = lm(score ~ ., data = collegedistance)
+vif(simple_add)
+```
+
+We can see from this model that there are **`r sum(vif(simple_add) >= 5)`** values greater than 5, so there appears to be no collinearity between our dependent variables
+
+<br />
+
+### Variable Intuition
+
+We will now do a brief summary of all of our variables, just to see if there are any more than we can remove
+
+```{r}
+colMeans(collegedistance)
+```
+
+Since all of these `arithmetic means` look good (especially since none of the factor variables have a mean of 0 or 1), we can start to build our model
+
+<br />
+
+## Method Exploration
+
+### Dependent Variable Transformation
+
+First, we'll take a look at our dependent variable, `score` to see if any transformations are necessary. We expect to see a normal distribution
+
+The function `buildHistogram()` will help us see this visually
+
+```{r}
+buildHistogram = function(values, title) {
+  # create the histogram
+  freq_hist = hist((values - mean(values)) / sd(values),
+                   col = "darkorange",
+                   xlab = "Score",
+                   main = title)
+  
+  # overlay the normal curve
+  multiplier = freq_hist$counts / freq_hist$density
+  x = seq(-3, 3, length.out = length(values))
+  curve(multiplier * dnorm(x), col = "dodgerblue", lwd=2, add=TRUE, yaxt="n")
+}
+```
+
+
+```{r warning = FALSE}
+buildHistogram(collegedistance$score, "Frequency of Normalized Score")
+```
+
+The above plot looks fairly normal, so we concluded that a dependent variable transformation was not needed in our model
+
+<br />
+
+### Independent Variable Transformation
+
+We'll now see if any independent variable transformations, specifically for our numeric variables, might be necessary by using scatter plots and our own statistical judgement and intuition as a starting point
+
+To start, we'll create a helper function to help us visualize our variables plotted against score
+
+```{r}
+buildScatterPlot = function(dep_label, ind_label, color1, color2 = color,
+                            interaction = TRUE) {
+  plot(y = unlist(collegedistance[tolower(dep_label)]),
+       x = unlist(collegedistance[tolower(ind_label)]),
+       xlab = ind_label,
+       ylab = dep_label,
+       main = paste(dep_label, " vs ", ind_label),
+       col = ifelse(interaction, color1, color2),
+       pch = 20,
+       cex = 1,
+       cex.lab = 2,
+       cex.axis = 2,
+       cex.main = 2)
+}
+```
+
+Now we'll make the plots for our numeric variables
+
+```{r fig.height = 10, fig.width = 15}
+par(mfrow = c(2, 2))
+buildScatterPlot("Score", "Wage", "dodgerblue")
+buildScatterPlot("Score", "Unemp", "darkorange")
+buildScatterPlot("Score", "Distance", "firebrick")
+buildScatterPlot("Score", "Tuition", "mediumpurple")
+```
+
+There appears to be no transformations needed, and unforunately our data looks fairly random, possibly indicating that there is no strong trend between our variables
+
+
+We also created charts to analyze simple interaction variables, but we were unsuccessful in finding trends between these interactions and score. This code can be found in the appendix of our project, under **Interaction Visualization**. Hence, it's difficult for us to visually extract trends, and we must now rely on statistcal metrics to continue
+
+<br />
+
+### Assumption Functions
+
+To make it easier for us to norrow down our options when selecting a model, we will check our assumptions using a variety of functions/tests.
+
+```{r}
+# performs the Breusch-Pagan test
+get_bp = function(model, alpha = 0.01) {
+  bptest_res = bptest(model)
+  decision = bptest_res$p.value < alpha
+  return(list(decision = ifelse(decision, "Reject", "Fail To Reject"),
+              stat = bptest_res$statistic, pvalue = bptest_res$p.value))
+}
+
+# performs the Shapiro-Wilk test
+get_shapiro = function(model, alpha = 0.01) {
+  shapiro_res = shapiro.test(resid(model))
+  decision = shapiro_res$p.value < alpha
+  return(list(decision = ifelse(decision, "Reject", "Fail to Reject"),
+              stat = shapiro_res$statistic, pvalue = shapiro_res$p.value))
+}
+
+# finds the RMSE of our model
+get_rmse = function(model) {
+  sqrt(mean((resid(model) / (1 - hatvalues(model))) ^ 2))
+}
+
+# combines the above helper methods into a readable format
+evaluate = function(name, model, response_func = I, data = collegedistance) {
+  set.seed(21)
+  data.frame(Model = name,
+             rmse = get_rmse(model),
+             adj_r2 = rsq(model, adj = TRUE),
+             aic = AIC(model),
+             bic = BIC(model),
+             coeff = length(coef(model)),
+             shapiro_dec = get_shapiro(model)$decision,
+             bp_dec = get_bp(model)$decision)
+}
+```
+
+<br />
+
+## Model Building + Testing
+
+### Basic Model Building
+
+Next, let's start creating some basic models.
+
+```{r}
+# Start with a model with all predictors.
+full_score_model = lm(score ~ ., data = collegedistance)
+full_score_eval = evaluate("All Additive Model", full_score_model)
+full_score_eval
+```
+
+Now that we have a baseline quality criterion, let's compare this to a model with the predictors chosen to be the most significant from the heat map. 
+
+```{r}
+# Comparing with a model using selected predictors.
+smaller_add_model = lm(score ~ education + fcollege + mcollege + wage + tuition +
+                               gender + home + income, data = collegedistance)
+smaller_add_eval = evaluate("Smaller Add Model", smaller_add_model)
+smaller_add_eval
+```
+
+We see that the additive model with chosen predictors has a lower adjusted $r^2$ and a higher BIC. Let's try comparing it to the interaction model.
+
+```{r}
+full_int_mod = lm(score ~ .^2, data = collegedistance)
+full_int_eval = evaluate("All Interaction Model", full_int_mod)
+full_int_eval
+```
+
+We see that the interaction model has a higher adjusted $r^2$, let's use an ANOVA $F$-test to choose between the All Additive Model and All Interaction Model.
+
+```{r}
+anova(full_score_model, full_int_mod)
+```
+
+The p-value is extremely low (0.0003279), so between the two, we choose the interaction model to begin narrowing down our predictors.
+
+<br />
+
+### Information Criteria Selection
+
+Also, we can see that the interaction model had a smaller AIC than BIC, so we will move forward with using backwards AIC to search for and narrow down parameters.
+
+We first begin by using backwards AIC to do a backwards parameter search.
+
+```{r}
+full_int_mod = lm(score ~ . ^ 2, data = collegedistance)
+distance_aic = step(full_int_mod, direction = "backward", trace = 0)
+coef(distance_aic)
+```
+
+Now that we have our significant coefficients, we can attempt to create a larger model, and run `AIC` once again
+
+```{r}
+distance_larger = lm(score ~ .^2 + I(gender^2) + I(fcollege^2) + I(mcollege^2) +
+                             I(home^2) + I(urban^2) + I(unemp^2) + I(wage^2) +
+                             I(distance^2) + I(tuition^2) + I(education^2) +
+                             I(hispanic^2) + I(afam^2), 
+                     data = collegedistance)
+distance_aic2 = step(distance_larger, direction = "backward", trace = 0)
+coef(distance_aic2)
+```
+
+Now we'll evaluate our first AIC model, which has **`r length(coef(distance_aic))`** coefficients
+
+```{r}
+evaluate("All Interactions", distance_aic)
+```
+
+And our second AIC model, which has **`r length(coef(distance_aic2))`** coefficients
+
+```{r}
+evaluate("Some interactions", distance_aic2)
+```
+
+<br />
+
+### Creating a Larger Model
+
+By looking at the parameters returned by backwards AIC, we can narrow them down to create a 'better' model
+
+**Note: This model does have too many parameters, but we will factor in the number of parameters used when looking at metrics like `Adjusted R Squared` and `ANOVA` test statistics**
+
+```{r}
+# create the model with large parameters
+large_param_model = lm(score ~ gender + fcollege + fcollege:mcollege + home + 
+                               urban + wage + distance + I(distance^(0.25)) +
+                               tuition + education + income + hispanic + afam +
+                               I(distance^2) + I(tuition^2) + I(education^2) +
+                               gender:home + gender:wage + gender:education +
+                               gender:hispanic + gender:afam + fcollege:income +
+                               mcollege:income + home:urban + home:unemp +
+                               home:distance + unemp:distance +
+                               unemp:hispanic + wage:hispanic + wage:afam +
+                               distance:hispanic + distance:afam + 
+                               tuition:education + income:hispanic + I(tuition^3) +
+                               log(tuition) + I(education^3)+ log(education) +
+                               I(tuition^0.25) + I(education^0.25) + I(wage^2) +
+                               gender:I(wage^2) + gender:I(log(wage)) +
+                               hispanic:I(wage^2) + hispanic:I(log(wage)) +
+                               home:I(unemp^2) + home:I(unemp^0.25) +
+                               home:I(log(unemp)) + home:I(distance^2) +
+                               home:I(distance^0.25) +  unemp:I(distance^2) +
+                               unemp:I(distance^0.25) + hispanic:I(distance^2) +
+                               hispanic:I(distance^0.25) + afam:I(distance^2) +
+                               afam:I(distance^0.25) + region, 
+                       data = collegedistance)
+
+# call the helper function
+evaluate("Large Parameter Model", large_param_model)
+```
+
+By running this model through our quality criterion function, we see that our LOOCV-RMSE, adjusted $R^2$, AIC and BIC numbers have improved significantly. However, the assumption tests still fail.
+
+Finally, we will perform ANOVA tests on all three of our contenders to erase any doubt when choosing the best model to move forward with.
+
+```{r}
+anova(distance_aic, distance_aic2, test = "F")
+```
+
+- $H_0$: There is a small difference in RSS between the two models.
+- The test statistic: 5.8834
+- The distribution of the test statistic under the null hypothesis: F-Distribution with 5 and 4704 DF
+- The p-value: 1.993e-05
+- A decision: We reject the null hypothesis at $\alpha = 0.10$ 
+- Preferred model: `distance_aic2`
+
+Now, let's compare `distance_aic2` with `large_param_model`.
+
+```{r}
+anova(distance_aic2, large_param_model, test = "F")
+```
+- $H_0$: There is a small difference in RSS between the two models.
+- The test statistic: 2.1876
+- The distribution of the test statistic under the null hypothesis: F-Distribution with 23 and 4658 DF
+- The p-value: 0.0008783
+- A decision: We reject the null hypothesis at $\alpha = 0.10$ 
+- Preferred model: `large_param_model`
+
+Great! We've confirmed that `large_param_model` is indeed the preferred model of all three, and now we will move on to finalizing the model.
+
+<br />
+
+### Finalizing the Model
+
+Before we finalize our model, we also need to make sure that we remove all of the unusual points in our data set
+
+The function `getUnsualPoints()` below will help us streamline the process of finding these points
+
+```{r}
+# finds the unusual points (leverage, residual, influential) of a certain model
+getUnusualPoints = function(model) {
+  # calculate leverage
+  num_high_leverage = sum(hatvalues(model) > 2 * mean(hatvalues(model)))
+  
+  # calculate large residuals
+  num_large_residual = sum(abs(rstandard(model)) > 2)
+  
+  # calculate influential
+  cooks_dist = cooks.distance(model)
+  num_influential = sum(cooks_dist > 4 / length(cooks_dist))
+  
+  # return the values
+  return(list(leverage = num_high_leverage,
+              residual = num_large_residual,
+              influential = num_influential))
+}
+```
+
+Let's run the above function with our current best model
+
+```{r}
+unusual_point_data = getUnusualPoints(large_param_model)
+print(unusual_point_data)
+```
+
+We find that we have **`r unusual_point_data$influential`** high influence points and **`r unusual_point_data$residual`** large residual points points, so we will remove them and create our final model
+
+We will repeat this process until the number of observations in our data set is still in the required amount of 2000, or if there's nothing else to remove
+
+```{r}
+# initialize our final model and cleaned dataset
+final_model = large_param_model
+collegedistance_cleaned = collegedistance
+
+while(nrow(collegedistance_cleaned) > 2000) {
+  
+  # calculate influence indexes
+  infl_indexes = which(cooks.distance(final_model) > 4 /
+                         length(cooks.distance((final_model))))
+  
+  # calculate residual indexes
+  resid_indexes = which(abs(rstandard(final_model)) > 2)
+  
+  # get all unique subset indexes
+  subset_indexes = unique(c(infl_indexes, resid_indexes))
+  
+  # break cases
+  if (nrow(collegedistance_cleaned) - length(subset_indexes) < 2000) {
+    break
+  }
+  if (length(subset_indexes) == 0) {
+    break
+  }
+  
+  # adjust the data set
+  collegedistance_cleaned = collegedistance_cleaned[-1 * subset_indexes,]
+  
+  # recalculate the final model
+  final_model = lm(score ~ gender + fcollege + fcollege:mcollege + home + 
+                               urban + wage + distance + I(distance^(0.25)) +
+                               tuition + education + income + hispanic + afam +
+                               I(distance^2) + I(tuition^2) + I(education^2) +
+                               gender:home + gender:wage + gender:education +
+                               gender:hispanic + gender:afam + fcollege:income +
+                               mcollege:income + home:urban + home:unemp +
+                               home:distance + unemp:distance +
+                               unemp:hispanic + wage:hispanic + wage:afam +
+                               distance:hispanic + distance:afam + 
+                               tuition:education + income:hispanic + I(tuition^3) +
+                               log(tuition) + I(education^3)+ log(education) +
+                               I(tuition^0.25) + I(education^0.25) + I(wage^2) +
+                               gender:I(wage^2) + gender:I(log(wage)) +
+                               hispanic:I(wage^2) + hispanic:I(log(wage)) +
+                               home:I(unemp^2) + home:I(unemp^0.25) +
+                               home:I(log(unemp)) + home:I(distance^2) +
+                               home:I(distance^0.25) +  unemp:I(distance^2) +
+                               unemp:I(distance^0.25) + hispanic:I(distance^2) +
+                               hispanic:I(distance^0.25) + afam:I(distance^2) +
+                               afam:I(distance^0.25) + region, 
+                       data = collegedistance_cleaned)
+}
+```
+
+After performing this final step, we obtain the following test results:
+
+```{r}
+final_eval_data = evaluate("Final Model", final_model)
+print(final_eval_data)
+```
+
+We are left with a model with `RMSE` of **`r final_eval_data$rmse`** and `Adjusted R Squared` of **`r final_eval_data$adj_r2`**. Removing these volatile entries from our data set greatly increased the accuracy of our model
+
+<br />
+
+## Model Results
+
+### Model Diagnostics
+
+We will now test the various diagnostics and assumptions of our final model
+
+The helper functions below will help us create the visuals we need:
+
+```{r}
+
+# create the fitted versus residuals scatter plot
+createFittedResidualsPlot = function(model) {
+  plot(fitted(model), resid(model), col = "grey", pch = 20,
+       xlab = "Fitted", ylab = "Residuals", 
+       main = "Fitted vs Residuals of Final Model")
+  abline(h = 0, col = "darkorange", lwd = 2)
+}
+
+# creates a histogram of residuals
+createResidualHistogram = function(model) {
+  hist(resid(model),
+     xlab   = "Residuals",
+     main   = "Histogram of Residuals for Final Model",
+     col    = "darkorange",
+     border = "dodgerblue",
+     breaks = 20)
+}
+
+# creates a Q-Q plot
+createQQPlot = function(model) {
+  qqnorm(resid(model), main = "Normal Q-Q Plot", col = "darkgrey", 
+         cex.main = 2, cex.axis = 2, cex.lab = 2)
+  qqline(resid(model), col = "dodgerblue", lwd = 2)
+}
+```
+
+First, we will take a look at the residuals of our model
+
+```{r fig.height = 5, fig.width = 15}
+par(mfrow = c(1, 2))
+createResidualHistogram(final_model)
+createFittedResidualsPlot(final_model)
+```
+
+Our residuals have a fairly normal distribution, albeit slightly more similar to a t-distribution, and there doesn't seem to be any general trend in the scatter plot
+
+We can double-check this with the Breusch-Pagan test
+
+```{r}
+# obtain our B-P test results
+final_bp = get_bp(final_model)
+print(final_bp)
+```
+
+Unforunately, when we run this test, we obtain a test statistic of **`r final_bp$stat`**, giving us a p-value of **`r final_bp$pvalue`**. It makes sense that we obtained visual results for homoscedasticity but statistical results for heterocedasticity, as we have shown that our data was difficult to predict with a model
+
+<br />
+
+Now we'll take a look at the Q-Q plot for our final model
+
+```{r fig.height = 10, fig.width = 15}
+createQQPlot(final_model)
+```
+
+We notice that visually, our Q-Q plot is not perfectly fitting our data. We can verify that this assumption is indeed violated with the Shapiro-Wilks test
+
+```{r}
+final_shapiro = get_shapiro(final_model)
+print(final_shapiro)
+```
+
+This test gives us a test statistic of **`r final_shapiro$stat`** and thus a p-value of **`r final_shapiro$pvalue`**, meaning that we **reject** $H_0$. Hence, this assumption is violated
+
+<br />
+
+Finally, we'll look at the number of unusual points in our data
+
+```{r}
+final_unusual = getUnusualPoints(final_model)
+print(final_unusual)
+```
+
+Our data has **`r final_unusual$leverage`** points of high leverage, **`r final_unusual$residual`** points of with large residual, and **`r final_unusual$influential`** influential points. Even with intensive data cleaning, these results prove our suspicions that the data selected is highly volatile
+
+<br />
+
+## Discussion
+
+### Process of choosing "Best" Model
+
+We began with a dataset of 4739 observations of 15 variables. We first cleaned our data and checked for any missing values. Fortunately, we did not have any and moved on to creating additional factor variables. Then we took a look at correlation between our predictors and observation variables in order to narrow down our method of choice in the 'Method Exploration' section. We decided upon using backwards AIC as our method of choice to narrow down predictors and successfully ended up with a promising model (a decision enforced by our ANOVA testing). To further improve upon our promising model, we applied a variety of response and predictor transformations and removed unusal points, ultimately giving us our "best" model.
+
+<br />
+
+### Practicality of "Best" Model
+
+After going through the proccesses of choosing a "best" model, the model that performed the best was the polished `large_param_model`, which modeled score against a number of quadratic, interaction, and additive predictors chosen using backwards AIC. However, even after utilizing backwards AIC, the model still had a relatively low $R^2$ value. This was significantly improved upon by removing the majority of any unusual points. With the final polished `large_param_model`, the relatively low cross validated $RMSE$ and high adjusted $R^2$ suggests that the model does an excellent job at predicting test scores. Ultimately, we believe that we succeeded in building a model that was accurate in predicting high schoolers' test scores based off of a number of carefully chosen predictor variables.
+
+<br />
+
+### Discussion of Coefficients
+
+The main purpose of this study was to see how different social and economic factors can affect a student's ability to perform in school. In this section, we will interpret the coefficients of our model
+
+First we'll create the dataframe with the data we need
+
+```{r warning = FALSE}
+# initialize the dataframe
+coef_df = data.frame(matrix(ncol = length(names(collegedistance)) - 1, nrow = 1))
+score_index = which(names(collegedistance) == "score")
+colnames(coef_df) = names(collegedistance)[-1 * score_index]
+
+# iterate through each name
+for (name in names(collegedistance)[-1 * score_index]) {
+  
+  # get the sum of coefficients
+  coef_indexes = grepl(name, names(coef(final_model)))
+  coef_avg = mean(coef(final_model)[coef_indexes])
+  
+  # add to the dataframe
+  coef_df[name] = coef_avg
+}
+
+# melt into our data
+coef_data = melt(coef_df)
+
+# sort by value
+coef_data = coef_data[order(abs(coef_data$value)),]
+```
+
+Now we'll present this data in a visual form. 
+
+```{r}
+createWeightPlot = function(start, end) {
+  barplot(height = coef_data[start:end,2],
+        names.arg = coef_data[start:end,1],
+        col = ifelse(coef_data[start:end,2] < 0, "tomato", "skyblue2"),
+        border = ifelse(coef_data[start:end,2] < 0, "darkred", "darkblue"),
+        xlab = "Variable Name",
+        ylab = "Average Weight",
+        main = "Average Weight of Variables",
+        cex.lab = 1.5,
+        cex.axis = 1.5,
+        cex.main = 1.5)
+  abline(h = 0)
+}
+```
+
+
+```{r fig.height = 10, fig.width = 15}
+par(mfrow = c(2, 2))
+createWeightPlot(1, 6)
+createWeightPlot(7, 9)
+createWeightPlot(10, 13)
+createWeightPlot(14, 14)
+```
+
+We can visually see the combined weight of every varaible (the plot is split into 4 sections to account for the different coefficient weights). The blue plots represent positive average coefficients, while the red plots represent negative average coefficients. With this data, we can now interpret our variables:
+
+*Note: These variables are a cumulative average weight, so they are not going to be completely precise, but it was the easiest way for us to interpret them. More information could be extracted by looking at each individual interaction*
+
+- `income`: Income is essentially zero, meaning that having high or low income family interestingly did not affect the test scores.
+
+- `distance`: The closer the student's four-year college was, the worse they would tend to do on the exam. This makes sense as many of the closest colleges to the students would be smaller, less-attended colleges
+
+- `mcollege`: The results show that if the student's father is a college graduate, he or she would have more of an advantage when it comes to test score.
+
+- `fcollege`: The same as `mcollege`, but to an even greater extent.
+
+- `urban`: Students that live in more urbanized areas are more likely to do worse on the standardized test.
+
+- `gender`: On average, men tended to do worse on the exam
+
+- `region`: The regions other than west did better on the standardized test
+
+- `afam`: The African-American students did worse on the test overall compared to the non-Hispanic and non-African-American students, but this could be correlated with many different factors
+
+- `hispanic`: The Hispanic students did better on the test overall compared to the non-Hispanic and non-African-American students, but this could be correlated with many different factors
+
+- `home`: Homeowning students tended to do worse on the standardized tests
+
+- `wage`: The higher the hourly wage in the student's location, the better they would do on the exam. This makes sense as a higher wage could result in better-funded education
+
+- `unemp`: The higher the unemployment rate in the county, the better the students would do on the exam. This result is pretty interesting, and if given the time, we would have liked to do future investigation of this
+
+- `tuition`: The students paying more tuition had higher test scores on average. This makes sense for the same reasoning as `wage`
+
+- `education`: The students that pursued higher levels of education had much higher test scores. This is not surprising, as we expect students that pursued more education would be more interested in school, and as a result would have done better on the exam
+
+Overall, many of our results matched our predictions, but it was interesting to see some outliers, such as `unemp`!
+
+<br />
+
+### Sample Predictions
+
+Now we can use our model to make some predictions
+
+<br />
+
+#### **Student 1 Prediction**
+
+Suppose we have a hispanic 12th grade male with a wage of $15.50. He lives in the suburbs with his college educated parents that make 120k annually and own their home which is 20 miles from M.I.T, a tuition valued at 2.5.
+
+```{r}
+# create the test data
+student1_data = data.frame(gender = "male", urban = "no", distance = 2, 
+                           tuition = 0.2, ethnicity = "hispanic", 
+                           unemp = 2.3, region = "other", wage = 11.50, 
+                           fcollege = "yes", mcollege = "yes", 
+                           income = "high", home = "yes", education = 12)
+student1_data = cleanData(student1_data)
+
+# make the prediction
+student1_pred = predict(final_model, newdata = student1_data)
+print(student1_pred)
+```
+
+Student 1 is predicted to have a test score of **`r student1_pred`**
+
+<br />
+
+#### **Student 2 Prediction**
+
+Let's test some of the other variables in the model with a different set of sample data.
+
+Suppose we have an African-American female who goes to school in an urban area in the west, with an unemployment rate of 20.3%. Her parents, neither of which went to college, make 20k a year and she's in 10th grade. The average wage of her hometown is 7.50 and tuition of the closest college of distance 0.2 is valued at 2
+
+```{r}
+# create the test data
+student2_data = data.frame(gender = "female", urban = "yes", distance = 0.2, 
+                           tuition = 2, ethnicity = "afam", 
+                           unemp = 20.3, region = "west", wage = 7.50, 
+                           fcollege = "no", mcollege = "no", 
+                           income = "low", home = "no", education = 10)
+student2_data = cleanData(student2_data)
+
+# make the prediction
+student2_pred = predict(final_model, newdata = student2_data)
+print(student2_pred)
+```
+
+Student 2 is predicted to have a test score of **`r student2_pred`**
+
+<br />
+
+#### **Visualization**
+
+Let's visualize where these students would be in the sample of all test scores
+
+```{r}
+hist(collegedistance$score,
+     breaks = 20,
+     main = "Score Distribution",
+     xlab = "Test Score",
+     col = "skyblue")
+
+legend("topleft", c("Student 1", "Student 2"), 
+       col = c("springgreen4", "firebrick"), lwd = 3)
+
+
+abline(v = student1_pred, col = "springgreen4", lwd = 3)
+abline(v = student2_pred, col = "firebrick", lwd = 3)
+
+```
+
+We outlined two very plausible scenarios, and it was interesting to see how those different parameters played out compared to the rest of the population of scores!
+
+<br />
+
+## Appendix
+
+### Interaction Visualization
+
+Below is the code we used to visualize possible interaction variables and their effect on score. The function `createInteractionPlots()` will save us from needing to repeat our code
+
+```{r}
+createInteractionPlots = function(interaction) {
+    par(mfrow = c(2, 2))
+    buildScatterPlot("Score", "Wage", "dodgerblue" , "cadetblue1",
+                     unlist(collegedistance[interaction]))
+    buildScatterPlot("Score", "Unemp", "seagreen1", "palegreen4",
+                     unlist(collegedistance[interaction]))
+    buildScatterPlot("Score", "Distance", "firebrick", "tomato",
+                     unlist(collegedistance[interaction]))
+    buildScatterPlot("Score", "Tuition", "mediumpurple", "orchid2",
+                     unlist(collegedistance[interaction]))
+}
+```
+
+<br />
+
+#### **Gender**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("gender")
+```
+
+<br />
+
+#### **Father Went to College?**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("fcollege")
+```
+
+<br />
+
+#### **Mother Went to College?**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("mcollege")
+```
+
+<br />
+
+#### **Home**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("home")
+```
+
+<br />
+
+#### **Urban**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("urban")
+```
+
+<br />
+
+#### **Income**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("income")
+```
+
+<br />
+
+#### **Region**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("region")
+```
+
+<br />
+
+#### **Hispanic**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("hispanic")
+```
+
+<br />
+
+#### **African American**
+
+```{r fig.height = 10, fig.width = 15}
+createInteractionPlots("afam")
+```
+
+<br />
+
+### Acknowledgements
+
+This project was created as a final project for [STAT 420](http://daviddalpiaz.github.io/appliedstats/). We would like to give a special thank you to Professor David Unger and the STAT 420 grading team for making this semester possible, despite the challenges of being online
+
+**Authors**
+
+- Allison Zhang
+- Kobe Dela Cruz
+- Nishant Balepur
+
