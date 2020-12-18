@@ -29,7 +29,7 @@ This dataset has a total of 4739 observations of 15 variables (14 predictors and
 
 Our project attempts to predict `score` from a combination of the other varaibles
 
-### Programming Languages
+### R Libraries
 
 This project was created in R with a variety of libraries:
 
